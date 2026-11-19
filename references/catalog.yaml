@@ -1,0 +1,1067 @@
+# =============================================================================
+# AI SDLC onboarding catalog
+# One file, one section per category. Every check, optional item and skill has a
+# stable slug; .ai-sdlc.yaml refers to them, so never rename a slug (add a new one).
+#
+# Check fields
+#   slug      unique, lowercase-with-dashes
+#   title     one line, shown in reports
+#   why       one or two sentences: why this matters for AI-assisted development
+#   level     must | optional (default comes from the section)
+#   tier      script = CLI/CI can decide | hybrid = script finds facts, chat judges | chat = chat only
+#   scope     repo = decided from repository files (works in CI) | local = needs this machine
+#   soft      true = a failed detection is only a warning (heuristic)
+#   stack     any | node | typescript | react | python | django   (default any)
+#   applies   optional detector; when it does not pass the check is "not applicable"
+#   since     skill version that introduced the check (default 0.1.0).
+#             Set this when adding a check. If it is newer than skill.version in
+#             .ai-sdlc.yaml, a failure is reported as a warning until init is re-run.
+#             That warning changes the score and does not block READY.
+#   detect    exists | contains | absent | any | all | per-eco | stack | dep | custom
+#   fix       steps shown when the check fails; {{skill_dir}} is replaced by the skill folder
+# =============================================================================
+version: 1
+sections:
+
+  # ---------------------------------------------------------------------------
+  environment:
+    title: Reproducible environment
+    description: A fresh clone on another machine must reach a working setup without asking anyone.
+    level: must
+    checks:
+      - slug: runtime-version-pinned
+        title: Runtime version is pinned
+        why: "Different Node or Python versions between machines cause failures that look random to people and to agents."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node:
+            type: any
+            of:
+              - {type: exists, paths: ['.nvmrc', '.node-version', '.tool-versions', 'mise.toml', '.mise.toml']}
+              - {type: contains, paths: ['package.json'], pattern: '"(engines|volta)"\s*:'}
+          python:
+            type: any
+            of:
+              - {type: exists, paths: ['.python-version', '.tool-versions', 'runtime.txt', 'mise.toml', '.mise.toml']}
+              - {type: contains, paths: ['pyproject.toml'], pattern: 'requires-python|^\s*python\s*=\s*"'}
+              - {type: contains, paths: ['Pipfile'], pattern: 'python_version'}
+              - {type: contains, paths: ['setup.cfg', 'setup.py'], pattern: 'python_requires'}
+        fix: |
+          Pin the runtime in a file every tool reads:
+          - Node: add `.nvmrc` (for example `22`) and/or `"engines": {"node": ">=22"}` in package.json.
+          - Python: add `.python-version` (for example `3.12`) and/or `requires-python` in pyproject.toml.
+          Use the same version in CI.
+
+      - slug: lockfile-committed
+        title: Dependency lockfile is committed
+        why: "Without a lockfile every machine and every agent session can resolve different dependency versions."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: exists, paths: ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock']}
+          python:
+            type: any
+            of:
+              - {type: exists, paths: ['poetry.lock', 'uv.lock', 'Pipfile.lock', 'pdm.lock', 'pylock.toml', 'requirements*.lock']}
+              - {type: contains, paths: ['requirements*.txt', 'requirements/*.txt'], pattern: '^[A-Za-z0-9_.\[\]-]+==', flags: 'm'}
+        fix: |
+          Generate and commit a lockfile with your package manager (npm install, pnpm install, yarn install,
+          poetry lock, uv lock, or pinned `==` versions in requirements.txt). Install from it in CI
+          (npm ci, pnpm install --frozen-lockfile, poetry install, ...).
+
+      - slug: bootstrap-command
+        title: One documented command sets up the project
+        why: "A new person or a new agent session should reach a working checkout with one documented step."
+        detect: {type: custom, name: bootstrap-command}
+        fix: |
+          Add a setup entry point and document it in README.md or AGENTS.md. Examples:
+          - package.json: "setup": "npm ci && npx husky"
+          - Makefile: `setup:` target that installs dependencies, git hooks and creates .env from .env.example
+          - scripts/setup.sh for anything else
+          Include hook installation so every clone gets the same guardrails.
+
+      - slug: env-example
+        title: .env.example exists and real .env files are not committed
+        why: "Agents and new teammates need to know which variables exist without ever seeing real secrets."
+        applies: {type: custom, name: env-example-applies}
+        detect:
+          type: all
+          of:
+            - {type: exists, paths: ['.env.example', '.env.sample', '.env.template', 'env.example', '.env.dist', '**/.env.example']}
+            - {type: custom, name: no-tracked-env}
+        fix: |
+          - Create `.env.example` listing every variable (names plus harmless placeholder values).
+          - Add `.env` and `.env.*` (except the example) to .gitignore.
+          - If a real env file is committed: `git rm --cached <file>`, rotate any secret it held, and commit.
+          Template: {{skill_dir}}/assets/env.example
+
+      - slug: local-services-reproducible
+        title: Local services (database, cache, queues) can be started from the repo
+        why: "If setting up Postgres or Redis lives in someone's head, nobody else can run or test the project."
+        applies: {type: custom, name: local-services}
+        detect: {type: custom, name: local-services}
+        fix: |
+          Add a `docker-compose.yml` (or `.devcontainer/`) for the services the project needs,
+          plus a documented command for migrations and seed data.
+
+      - slug: toolchain-matches-pinned
+        title: Installed runtime matches the pinned version
+        why: "The repo pins a version, but this machine may run another one."
+        scope: local
+        stack: [node, python]
+        detect: {type: custom, name: toolchain-matches}
+        fix: |
+          Install the pinned version (nvm use / fnm use / volta / pyenv install) and re-run the audit.
+
+      - slug: required-env-vars-set
+        title: Required environment variables are set on this machine
+        why: "Variables listed in .env.example must exist locally before the project can run."
+        scope: local
+        detect: {type: custom, name: env-vars-set}
+        fix: |
+          Copy `.env.example` to `.env`, fill in the missing variables (from your secret manager),
+          and never commit the file. Only variable names are reported, never values.
+
+  # ---------------------------------------------------------------------------
+  verification:
+    title: Verification loop
+    description: Agents and people are only as good as the feedback they get; the commands must be obvious, fast and identical locally and in CI.
+    level: must
+    checks:
+      - slug: canonical-commands
+        title: Lint, test (and typecheck/build where relevant) commands exist
+        why: "An agent that cannot find one obvious command per quality gate guesses, or skips verification."
+        stack: [node, python]
+        detect: {type: custom, name: canonical-commands}
+        fix: |
+          Define one script or Make target per gate (lint, test, typecheck, build) and document them in AGENTS.md.
+          Example package.json scripts: "lint", "typecheck", "test", "build".
+
+      - slug: agent-docs-commands-valid
+        title: Commands documented in AGENTS.md actually exist
+        why: "Stale commands make agents fail in confusing ways or invent their own."
+        detect: {type: custom, name: agent-docs-commands-valid}
+        fix: |
+          Update AGENTS.md so every `npm run <x>`, `pnpm <x>` or `make <x>` it mentions exists in package.json or the Makefile.
+          Document at least the setup, test and lint commands.
+
+      - slug: single-test-documented
+        title: Running a single test is documented
+        why: "Agents iterate faster and cheaper when they can run one test file instead of the whole suite."
+        soft: true
+        detect: {type: custom, name: single-test-documented}
+        fix: |
+          Add an example to AGENTS.md, for example `pytest path/to/test_file.py -k name` or `npm test -- path/to/file`.
+
+      - slug: ci-runs-quality-gates
+        title: CI runs lint, typecheck and tests
+        why: "CI is the backstop for everything agents and people forget to run locally."
+        detect: {type: custom, name: ci-runs-quality-gates}
+        fix: |
+          Add a CI workflow (for example .github/workflows/ci.yml) that installs from the lockfile and runs lint,
+          typecheck (if applicable) and tests on every pull request.
+          Starter: {{skill_dir}}/assets/ci-github-actions.yml (audit job only; add your own quality jobs).
+
+      - slug: ci-uses-repo-scripts
+        title: CI calls the same scripts as local development
+        why: "When CI and local use different commands they drift, and 'passes locally, fails in CI' follows."
+        soft: true
+        detect: {type: custom, name: ci-uses-repo-scripts}
+        fix: |
+          Make CI run the repo scripts (`npm run lint`, `make test`, ...) instead of re-typing raw tool commands.
+
+      - slug: typescript-strict
+        title: TypeScript strict mode is enabled
+        why: "Strict types give agents a machine-checkable definition of correct."
+        stack: [typescript]
+        detect: {type: custom, name: typescript-strict}
+        fix: |
+          Set `"strict": true` in tsconfig.json (or extend a preset that does) and fix errors incrementally.
+
+  # ---------------------------------------------------------------------------
+  enforcement:
+    title: Enforcement parity
+    description: Every standard is defined once and enforced the same way in the editor, pre-commit, CI and for agents.
+    level: must
+    checks:
+      - slug: formatter-config-committed
+        title: One formatter configuration is committed
+        why: "Two developers (or two agents) formatting differently creates noisy diffs and review fatigue."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node:
+            type: any
+            of:
+              - {type: exists, paths: ['.prettierrc', '.prettierrc.*', 'prettier.config.*', 'biome.json', 'biome.jsonc', 'dprint.json', '.dprint.json']}
+              - {type: contains, paths: ['package.json'], pattern: '"prettier"\s*:'}
+          python:
+            type: any
+            of:
+              - {type: exists, paths: ['ruff.toml', '.ruff.toml', '.style.yapf']}
+              - {type: contains, paths: ['pyproject.toml'], pattern: '^\[tool\.(ruff|black|yapf)'}
+        fix: |
+          Commit one formatter config per language (Prettier or Biome for JS/TS; Ruff or Black for Python).
+
+      - slug: linter-config-committed
+        title: One linter configuration is committed
+        why: "Linter rules are the cheapest way to make agents respect team standards."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node:
+            type: any
+            of:
+              - {type: exists, paths: ['eslint.config.*', '.eslintrc', '.eslintrc.*', 'biome.json', 'biome.jsonc']}
+              - {type: contains, paths: ['package.json'], pattern: '"eslintConfig"\s*:'}
+          python:
+            type: any
+            of:
+              - {type: exists, paths: ['ruff.toml', '.ruff.toml', '.flake8', '.pylintrc']}
+              - {type: contains, paths: ['pyproject.toml'], pattern: '^\[tool\.(ruff|pylint|flake8)'}
+              - {type: contains, paths: ['setup.cfg', 'tox.ini'], pattern: '^\[flake8\]'}
+        fix: |
+          Commit an ESLint/Biome config (JS/TS) or Ruff/flake8 config (Python) and run it in CI.
+
+      - slug: editor-settings-shared
+        title: Shared editor settings are committed
+        why: "Format-on-save and consistent whitespace stop formatting drift before it reaches a commit."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.editorconfig']}
+            - {type: contains, paths: ['.vscode/settings.json', '.cursor/settings.json'], pattern: 'formatOnSave'}
+        fix: |
+          Commit `.editorconfig` and/or `.vscode/settings.json` with format-on-save enabled.
+
+      - slug: pre-commit-configured
+        title: A pre-commit hook tool is configured
+        why: "Hooks catch formatting and lint problems before they reach review or CI."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.husky/*', 'lefthook.yml', 'lefthook.yaml', '.lefthook.yml', '.pre-commit-config.yaml', '.pre-commit-config.yml', '.githooks/*']}
+            - {type: contains, paths: ['package.json'], pattern: '"(lint-staged|simple-git-hooks|husky)"\s*:'}
+        fix: |
+          Set up husky + lint-staged, lefthook, or the pre-commit framework, and install the hooks from the
+          bootstrap command so every clone gets them.
+
+      - slug: pre-commit-runs-format-lint
+        title: Pre-commit runs the formatter and linter
+        why: "A hook that exists but does not run the shared formatter/linter enforces nothing."
+        soft: true
+        detect:
+          type: any
+          of:
+            - {type: contains, paths: ['.husky/*', 'lefthook*.y*ml', '.lefthook*.y*ml', '.pre-commit-config.y*ml', '.githooks/*'], pattern: '(eslint|prettier|ruff|black|biome|flake8|lint-staged|(npm|pnpm|yarn)( run)? (lint|format)|make (lint|format))'}
+            - {type: contains, paths: ['package.json'], pattern: '"lint-staged"\s*:\s*\{'}
+        fix: |
+          Make the hook call the same formatter and linter configuration CI uses
+          (for example lint-staged running `prettier --write` and `eslint --fix`).
+
+      - slug: agent-rules-reference-config
+        title: Agent rules point at the shared formatter/linter config instead of restating it
+        why: "Rules typed into agent files drift from the real config; the real config plus a post-edit check is what holds."
+        tier: hybrid
+        soft: true
+        detect: {type: custom, name: agent-rules-reference-config}
+        fix: |
+          In AGENTS.md / rule files, say "follow the repo's Prettier/ESLint config" instead of listing style rules.
+          Keep enforcement in the tools (pre-commit and CI).
+
+      - slug: tooling-versions-pinned
+        title: Formatter and linter versions are pinned in the repo
+        why: "A globally installed formatter version differs per machine and reformats files unpredictably."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: contains, paths: ['package.json'], pattern: '"(prettier|eslint|@biomejs/biome)"\s*:'}
+          python: {type: contains, paths: ['requirements*.txt', 'pyproject.toml', 'Pipfile', '.pre-commit-config.y*ml'], pattern: '(ruff|black|flake8|pylint)'}
+        fix: |
+          Add the formatter and linter as dev dependencies (or pin them in .pre-commit-config.yaml), not as global installs.
+
+      - slug: git-hooks-installed
+        title: Git hooks are installed in this clone
+        why: "Hooks configured in the repo do nothing until they are installed locally."
+        scope: local
+        detect: {type: custom, name: hooks-installed}
+        fix: |
+          Run the project's bootstrap command (or `npx husky`, `lefthook install`, `pre-commit install`).
+
+  # ---------------------------------------------------------------------------
+  context:
+    title: Agent context in the repository
+    description: What an agent (or a new person) needs to know must live in the repo, not in someone's head or home folder.
+    level: must
+    checks:
+      - slug: agents-md-complete
+        title: AGENTS.md exists and covers commands, architecture, conventions and boundaries
+        why: "AGENTS.md is the tool-neutral place agents read first; a missing or thin file means every session starts from zero."
+        detect: {type: custom, name: agents-md-complete}
+        fix: |
+          Create AGENTS.md with sections for: setup/test/lint commands, architecture overview, code conventions,
+          and boundaries (what not to touch, what needs approval).
+          Template: {{skill_dir}}/assets/AGENTS.template.md
+
+      - slug: agent-docs-paths-valid
+        title: Paths mentioned in agent instruction files exist
+        why: "References to moved or deleted files send agents looking for things that are not there."
+        soft: true
+        detect: {type: custom, name: agent-docs-paths-valid}
+        fix: |
+          Update or remove the missing paths in AGENTS.md / rule files. Paths written as examples can be ignored.
+
+      - slug: agent-files-not-duplicated
+        title: Tool-specific instruction files point to AGENTS.md instead of duplicating it
+        why: "Several long files that say the same thing diverge, and agents follow whichever they read."
+        tier: hybrid
+        soft: true
+        detect: {type: custom, name: agent-files-not-duplicated}
+        fix: |
+          Keep the content in AGENTS.md and reduce CLAUDE.md / copilot-instructions / .cursorrules to short pointers
+          plus anything genuinely specific to that tool.
+
+      - slug: agent-ignore-file
+        title: Secrets, generated and vendor paths are hidden from agents
+        why: "Agents read whatever they can see; keep credentials and noise out of their context."
+        detect: {type: custom, name: agent-ignore-file}
+        fix: |
+          - Cursor: add `.cursorignore` (and/or `.cursorindexingignore`) listing .env files, keys, generated and vendor paths.
+          - Claude Code: add `permissions.deny` rules in `.claude/settings.json`, for example `Read(./.env)`.
+
+      - slug: agent-context-size
+        title: Always-on agent context is kept small
+        why: "A very large always-on context dilutes instructions; scope conventions to the files they apply to."
+        tier: hybrid
+        soft: true
+        detect: {type: custom, name: agent-context-size}
+        fix: |
+          Split long AGENTS.md sections into glob-scoped rules or skills, and avoid `alwaysApply: true` on large rules.
+
+  # ---------------------------------------------------------------------------
+  security:
+    title: Security hygiene
+    description: Agents read, write and run things; keep secrets out and the blast radius small.
+    level: must
+    checks:
+      - slug: secret-scanning-enabled
+        title: Secret scanning runs in pre-commit or CI
+        why: "Agents and people both paste credentials into files; scanning catches it before it is pushed."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.gitleaks.toml', '.gitleaksignore', '.secrets.baseline', '.trufflehog.yml']}
+            - {type: contains, paths: ['.pre-commit-config.y*ml', '.github/**/*.{yml,yaml}', '.gitlab-ci.yml', 'lefthook*.y*ml', '.husky/*', 'package.json', 'Jenkinsfile'], pattern: '(gitleaks|trufflehog|detect-secrets|git-secrets|secretlint|ggshield|detect_secrets)'}
+        fix: |
+          Add gitleaks (or trufflehog / detect-secrets) to pre-commit and CI.
+
+      - slug: no-secrets-committed
+        title: No credentials are committed
+        why: "A committed key is compromised the moment it is pushed, and agents may quote what they read."
+        detect: {type: custom, name: secret-scan}
+        fix: |
+          Remove the credential from the file, rotate it (assume it is compromised), load it from the environment
+          instead, and purge it from history if it was pushed. Values are never shown in this report.
+
+      - slug: dependency-audit-in-ci
+        title: Dependency vulnerability checks run automatically
+        why: "Agents add dependencies freely; automated checks catch vulnerable or suspicious ones."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.github/dependabot.yml', '.github/dependabot.yaml', 'renovate.json', '.renovaterc', '.renovaterc.json', 'renovate.json5']}
+            - {type: contains, paths: ['.github/**/*.{yml,yaml}', '.gitlab-ci.yml', 'Jenkinsfile', 'package.json', 'Makefile'], pattern: '(npm audit|pnpm audit|yarn (npm )?audit|pip-audit|safety check|osv-scanner|snyk|trivy|dependency-review|audit-ci)'}
+        fix: |
+          Enable Dependabot or Renovate, and/or add `npm audit` / `pip-audit` / dependency-review to CI.
+
+      - slug: no-prod-credentials-in-examples
+        title: Example env files hold placeholders, not real or production values
+        why: "Example files get copied into prompts and tickets; they must never carry live credentials."
+        tier: hybrid
+        soft: true
+        detect: {type: custom, name: example-env-values}
+        fix: |
+          Replace values in `.env.example` with obvious placeholders and rotate anything real that was there.
+
+      - slug: mcp-no-inline-secrets
+        title: MCP configs reference environment variables instead of literal secrets
+        why: "MCP config files are committed; a literal token in them is a leaked token."
+        detect: {type: custom, name: mcp-no-inline-secrets}
+        fix: |
+          Replace literal tokens in the MCP config with environment-variable references (for example `${env:NAME}` in
+          Cursor or `${NAME}` in Claude Code; check your tool's docs for the exact syntax) and rotate any token that was committed.
+
+  # ---------------------------------------------------------------------------
+  conventions:
+    title: Project conventions
+    description: Basic documentation and process hygiene that makes work portable between people.
+    level: must
+    checks:
+      - slug: pull-request-template
+        title: A pull request template exists
+        why: "A template keeps acceptance criteria and test notes attached to every change, including agent-written ones."
+        detect: {type: exists, paths: ['.github/pull_request_template.md', '.github/PULL_REQUEST_TEMPLATE.md', '.github/PULL_REQUEST_TEMPLATE/*', 'docs/pull_request_template.md', 'pull_request_template.md', '.gitlab/merge_request_templates/*']}
+        fix: |
+          Add `.github/pull_request_template.md` (or the GitLab equivalent).
+          Template: {{skill_dir}}/assets/pull_request_template.md
+          Gerrit or other review systems without PR templates: use ignored_checks with a reason.
+
+      - slug: readme-setup-and-run
+        title: README explains setup and how to run the project
+        why: "The README is the first thing a new person (or agent) reads."
+        detect: {type: custom, name: readme-setup-and-run}
+        fix: |
+          Add Setup/Installation and Usage/Development sections to README.md with the exact commands.
+
+      - slug: plans-and-specs-location
+        title: There is a documented place for plans, specs and task state
+        why: "Work state that lives only in chat history cannot be picked up by another person or session."
+        soft: true
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['docs/{plans,specs,adr,adrs,decisions,rfcs}/**', '{plans,specs,adr,adrs,decisions}/**', 'openspec/**', '.taskmaster/**', 'PLAN.md', 'docs/architecture.md']}
+            - {type: contains, paths: ['AGENTS.md', 'CONTRIBUTING.md'], pattern: '(specs?|plans?|ADRs?|tickets?|issue tracker|jira)'}
+        fix: |
+          Choose where plans and specs live (for example docs/specs/) or which tracker holds them, and say so in AGENTS.md.
+
+  # ---------------------------------------------------------------------------
+  mcp:
+    title: MCP configuration
+    description: If the project uses MCP servers, their configuration must be shared, documented and secret-free.
+    level: must
+    checks:
+      - slug: mcp-config-committed
+        title: Project-level MCP configuration is committed
+        why: "MCP set up only in one person's user settings means nobody else gets the same tools."
+        detect: {type: custom, name: mcp-config-committed}
+        fix: |
+          Put the MCP servers the project relies on in a committed project file (Cursor: .cursor/mcp.json,
+          Claude Code: .mcp.json) and make sure it is not git-ignored.
+
+      - slug: mcp-servers-documented
+        title: Every configured MCP server is documented
+        why: "People need to know what each server is for and how to authenticate before they can use it."
+        detect: {type: custom, name: mcp-servers-documented}
+        fix: |
+          Mention each MCP server (purpose, required variables, how to authenticate) in AGENTS.md or README.md.
+
+  # ---------------------------------------------------------------------------
+  integrations:
+    title: Integrations
+    description: "MCP servers and related tools. Choose providers per category in the mcp section of .ai-sdlc.yaml."
+    level: optional
+    mcp_categories:
+      code-host:
+        title: Code host / review
+        description: "Where code is hosted and reviewed. Alternatives: GitHub, GitLab, Gerrit (pick one or more)."
+        providers:
+          - key: github
+            slug: github
+            title: GitHub (gh CLI and/or GitHub MCP)
+            description: "Pull requests, issues and CI through GitHub: usage documented, gh authenticated locally, and MCP working if used."
+            match: github
+            setup: references/integrations/github.md
+            checks:
+              - slug: github-usage-documented
+                title: GitHub access (gh CLI or MCP) is documented or configured
+                why: "Agents need to know whether to use the gh CLI or an MCP server for GitHub."
+                detect:
+                  type: any
+                  of:
+                    - {type: contains, paths: ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', 'docs/**/*.md'], pattern: '(\bgh (pr|issue|run|api|auth|repo)\b|GitHub CLI|github mcp)'}
+                    - {type: custom, name: mcp-server, match: github, require: present}
+                fix: |
+                  Document in AGENTS.md how GitHub is accessed (gh CLI commands, or the GitHub MCP server).
+              - slug: github-cli-authenticated
+                title: gh CLI is installed and authenticated
+                why: "Commands that touch pull requests fail without an authenticated gh."
+                scope: local
+                applies: {type: contains, paths: ['AGENTS.md', 'README.md', 'CONTRIBUTING.md', 'docs/**/*.md'], pattern: '(\bgh (pr|issue|run|api|auth|repo)\b|GitHub CLI)'}
+                detect: {type: custom, name: gh-cli-auth}
+                fix: |
+                  Install the GitHub CLI and run `gh auth login`. Guide: {{skill_dir}}/references/integrations/github.md
+              - slug: github-mcp-authenticated
+                title: GitHub MCP connection works and is authenticated
+                why: "Configured is not the same as working."
+                scope: local
+                tier: chat
+                applies: {type: custom, name: mcp-server, match: github, require: present}
+                chat_note: "Validate in chat: confirm the GitHub MCP tools are available and make one harmless read-only call."
+                fix: |
+                  Authenticate the GitHub MCP server in your AI tool. Guide: {{skill_dir}}/references/integrations/github.md
+          - key: gitlab
+            slug: gitlab-mcp
+            title: GitLab MCP
+            description: "Merge requests and issues through a GitLab MCP server."
+            template: mcp
+            match: gitlab
+            setup: references/integrations/gitlab-mcp.md
+          - key: gerrit
+            slug: gerrit-mcp
+            title: Gerrit MCP
+            description: "Code review through a Gerrit MCP server: config committed, variables declared and set, connection authenticated."
+            template: mcp
+            match: gerrit
+            setup: references/integrations/gerrit-mcp.md
+      issue-tracker:
+        title: Issue tracker
+        description: "Ticket system. Alternatives: Jira, Linear."
+        providers:
+          - key: jira
+            slug: jira-mcp
+            title: Jira MCP
+            description: "Tickets through a Jira (Atlassian) MCP server."
+            template: mcp
+            match: 'jira|atlassian'
+            setup: references/integrations/jira-mcp.md
+          - key: linear
+            slug: linear-mcp
+            title: Linear MCP
+            description: "Tickets through a Linear MCP server."
+            template: mcp
+            match: linear
+            setup: references/integrations/linear-mcp.md
+      docs:
+        title: Documentation
+        description: "Team docs through Confluence or similar."
+        providers:
+          - key: confluence
+            slug: confluence-mcp
+            title: Confluence MCP
+            description: "Docs through a Confluence (Atlassian) MCP server."
+            template: mcp
+            match: confluence
+            setup: references/integrations/confluence-mcp.md
+      design:
+        title: Design
+        description: "Design context (Figma)."
+        providers:
+          - key: figma
+            slug: figma-mcp
+            title: Figma MCP
+            description: "Design context through a Figma MCP server."
+            template: mcp
+            match: figma
+            setup: references/integrations/figma-mcp.md
+      errors:
+        title: Error tracking
+        description: "Error context (Sentry MCP). The Sentry security baseline is a separate optional item."
+        providers:
+          - key: sentry
+            slug: sentry-mcp
+            title: Sentry MCP
+            description: "Error context through a Sentry MCP server."
+            template: mcp
+            match: sentry
+            setup: references/integrations/sentry-mcp.md
+      chat:
+        title: Team chat
+        description: "Slack or similar."
+        providers:
+          - key: slack
+            slug: slack-mcp
+            title: Slack MCP
+            description: "Team chat through a Slack MCP server."
+            template: mcp
+            match: slack
+            setup: references/integrations/slack-mcp.md
+      browser:
+        title: Browser / UI verification
+        description: "Playwright or browser MCP for UI checks. Recommended for React apps."
+        default_off_unless_stack: [react]
+        providers:
+          - key: playwright
+            slug: playwright-mcp
+            title: Playwright / browser MCP
+            description: "UI verification through a Playwright or browser MCP server."
+            template: mcp
+            match: 'playwright|browser'
+            setup: references/integrations/playwright-mcp.md
+            stack: [react, node]
+      database:
+        title: Database
+        description: "Database MCP (Postgres). Recommended for Django/Python backends."
+        default_off_unless_stack: [django, python]
+        providers:
+          - key: postgres
+            slug: postgres-mcp
+            title: Postgres / database MCP
+            description: "Database access through a Postgres MCP server."
+            template: mcp
+            match: 'postgres|postgresql|database'
+            setup: references/integrations/postgres-mcp.md
+            stack: [python, django]
+      library-docs:
+        title: Library documentation
+        description: "Up-to-date library docs (Context7 or similar)."
+        providers:
+          - key: context7
+            slug: context7-mcp
+            title: Context7 / library docs MCP
+            description: "Library documentation through a Context7-style MCP server."
+            template: mcp
+            match: 'context7|library.?docs'
+            setup: references/integrations/context7-mcp.md
+    groups:
+      - slug: sentry-security
+        title: Sentry security baseline (any setup approach)
+        description: "Applies when Sentry is in use. Checks outcomes, not approach: no tokens in the repo, explicit PII handling, environment and release set."
+        setup: references/integrations/sentry-security.md
+        applies: {type: dep, names: ['@sentry/*', 'sentry-sdk', 'sentry_sdk', 'raven']}
+        checks:
+          - slug: sentry-no-auth-tokens-committed
+            title: No Sentry auth tokens are committed
+            why: "Auth tokens grant API access to your Sentry organisation."
+            detect: {type: custom, name: secret-scan, only: sentry}
+            fix: |
+              Remove the token, rotate it in Sentry, and provide it through CI secrets or the environment.
+          - slug: sentry-pii-handling-explicit
+            title: PII sending is set explicitly in the Sentry configuration
+            why: "Defaults can change between SDK versions; make the decision visible in code."
+            soft: true
+            detect: {type: contains, paths: ['**/*.{js,jsx,ts,tsx,mjs,py}'], pattern: '(sendDefaultPii|send_default_pii)'}
+            fix: |
+              Set `sendDefaultPii` (JS) / `send_default_pii` (Python) explicitly and add scrubbing (`beforeSend` / `before_send`) if needed.
+          - slug: sentry-environment-set
+            title: Sentry environment is set
+            why: "Without it, development and production errors mix."
+            soft: true
+            detect: {type: contains, paths: ['**/*.{js,jsx,ts,tsx,mjs,py}', '.env.example'], pattern: '(environment\s*[:=]|SENTRY_ENVIRONMENT)'}
+            fix: |
+              Pass `environment` to Sentry init or set SENTRY_ENVIRONMENT per deployment.
+          - slug: sentry-release-tracked
+            title: Sentry releases are tracked
+            why: "Releases link errors to the commit that introduced them."
+            soft: true
+            detect: {type: contains, paths: ['**/*.{js,jsx,ts,tsx,mjs,py}', '.env.example', '.github/**/*.{yml,yaml}', 'package.json'], pattern: '(release\s*[:=]|SENTRY_RELEASE|sentry-cli releases|getsentry/action-release)'}
+            fix: |
+              Set `release` in the SDK config or create releases in CI.
+
+  # ---------------------------------------------------------------------------
+  quality:
+    title: Quality guardrails
+    description: Additional guardrails that help agent-written code stay reviewable and safe.
+    level: optional
+    checks:
+      - slug: boundary-lint
+        title: Module boundary rules are enforced by a linter
+        why: "Agents silently violate layering and import rules that people would notice."
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: contains, paths: ['package.json', 'eslint.config.*', '.eslintrc*', '.dependency-cruiser.*'], pattern: '(eslint-plugin-boundaries|import/no-restricted-paths|no-restricted-imports|dependency-cruiser|enforce-module-boundaries)'}
+          python: {type: contains, paths: ['pyproject.toml', 'setup.cfg', '.importlinter', 'tox.ini'], pattern: '(import-linter|importlinter)'}
+        fix: |
+          Add import/boundary rules (eslint-plugin-boundaries or dependency-cruiser for JS/TS, import-linter for Python) and run them in CI.
+      - slug: schema-to-types-generation
+        title: API types are generated from a schema
+        why: "A generated contract lets agents (and the compiler) catch client/server drift."
+        soft: true
+        stack: [typescript, python]
+        detect: {type: contains, paths: ['package.json', 'pyproject.toml', 'requirements*.txt', 'Makefile'], pattern: '(openapi-typescript|orval|graphql-codegen|@hey-api|swagger-typescript-api|drf-spectacular|openapi-generator)'}
+        fix: |
+          Generate client types from the API schema (OpenAPI/GraphQL) with a documented command, and run it in CI.
+      - slug: generated-files-documented
+        title: Generated files are marked and their regeneration command is documented
+        why: "Agents hand-edit generated files and the change is lost on the next build."
+        soft: true
+        detect: {type: contains, paths: ['AGENTS.md', 'README.md', 'CONTRIBUTING.md'], pattern: '(generated|codegen|do not edit)'}
+        fix: |
+          List generated paths and the command that regenerates them in AGENTS.md.
+      - slug: docs-link-check
+        title: Documentation links and paths are checked in CI
+        why: "Stale docs mislead agents more than missing docs."
+        soft: true
+        detect: {type: contains, paths: ['.github/**/*.{yml,yaml}', '.gitlab-ci.yml', 'package.json', 'Makefile', '.pre-commit-config.y*ml'], pattern: '(markdown-link-check|lychee|linkinator|remark-validate-links|mkdocs.*--strict)'}
+        fix: |
+          Add a link checker (lychee, markdown-link-check) to CI.
+      - slug: tests-avoid-external-network
+        title: Tests do not depend on real external services
+        why: "Tests that hit live services are flaky and agents chase the flakiness."
+        tier: hybrid
+        soft: true
+        detect: {type: custom, name: tests-avoid-network}
+        fix: |
+          Mock HTTP at the boundary (msw, nock, responses, requests-mock, pytest-httpx) or block network access in tests.
+      - slug: per-package-agent-docs
+        title: Monorepo packages have their own AGENTS.md
+        why: "One root file cannot describe both a React app and a Django service."
+        detect: {type: custom, name: nested-agent-docs}
+        fix: |
+          Add an AGENTS.md inside each package that has its own commands or conventions.
+      - slug: python-type-checking
+        title: Python static type checking is configured
+        why: "Type checking gives agents fast feedback on Python code."
+        stack: [python]
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['mypy.ini', '.mypy.ini', 'pyrightconfig.json']}
+            - {type: contains, paths: ['pyproject.toml', 'setup.cfg'], pattern: '^\[(tool\.)?(mypy|pyright)'}
+        fix: |
+          Configure mypy or pyright and run it in CI.
+      - slug: commit-convention
+        title: A commit message convention is documented or enforced
+        why: "Consistent commit messages make history readable for people and agents."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['commitlint.config.*', '.commitlintrc*', '.gitmessage']}
+            - {type: contains, paths: ['CONTRIBUTING.md', 'AGENTS.md', '.pre-commit-config.y*ml'], pattern: '(conventional commits|commit message|commitizen|conventional-pre-commit)'}
+        fix: |
+          Document a convention in CONTRIBUTING.md/AGENTS.md or enforce it with commitlint.
+
+  # ---------------------------------------------------------------------------
+  coding-standards:
+    title: Coding standards
+    description: Lint and test rules that keep agent-written code consistent.
+    level: optional
+    checks:
+      - slug: complexity-and-size-lint
+        since: 0.2.0
+        title: Complexity or file-size lint rules are configured
+        why: "Agents produce oversized files and nested logic unless a linter stops them."
+        soft: true
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: contains, paths: ['eslint.config.*', '.eslintrc*', 'biome.json', 'biome.jsonc'], pattern: '(complexity|max-lines|max-depth|max-params|cognitive)'}
+          python: {type: contains, paths: ['ruff.toml', '.ruff.toml', 'pyproject.toml', 'setup.cfg'], pattern: '(C901|PLR09|too-complex|max-complexity|mccabe)'}
+        fix: |
+          Enable complexity / max-lines rules in ESLint, Biome or Ruff and fail CI on violations.
+      - slug: no-debug-output
+        since: 0.2.0
+        title: Debug output (console.log / print) is linted
+        why: "Debug prints leak into production and noise up agent diffs."
+        soft: true
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: contains, paths: ['eslint.config.*', '.eslintrc*', 'biome.json', 'biome.jsonc'], pattern: '(no-console|noConsole)'}
+          python: {type: contains, paths: ['ruff.toml', '.ruff.toml', 'pyproject.toml', 'setup.cfg', '.flake8'], pattern: '(T20|flake8-print|print_statement)'}
+        fix: |
+          Enable no-console (ESLint/Biome) or flake8-print / Ruff T20, with documented exceptions.
+      - slug: import-ordering
+        since: 0.2.0
+        title: Import ordering is enforced
+        why: "Consistent imports reduce noisy diffs from agents reformatting files differently."
+        soft: true
+        stack: [node, python]
+        detect:
+          type: per-eco
+          node: {type: contains, paths: ['package.json', 'eslint.config.*', '.eslintrc*', 'biome.json'], pattern: '(simple-import-sort|import/order|organizeImports|perfectionist)'}
+          python: {type: contains, paths: ['ruff.toml', '.ruff.toml', 'pyproject.toml', 'setup.cfg', '.isort.cfg'], pattern: '(isort|I001|tool\.ruff\.lint\.isort)'}
+        fix: |
+          Enforce import order (eslint-plugin-import / Biome organizeImports / Ruff isort) in the formatter or linter.
+      - slug: coverage-threshold
+        since: 0.2.0
+        title: A test coverage threshold is configured
+        why: "Without a floor, agents skip tests for the code they add."
+        soft: true
+        detect: {type: contains, paths: ['package.json', 'vitest.config.*', 'jest.config.*', 'pyproject.toml', 'setup.cfg', '.coveragerc', 'codecov.yml', '.github/**/*.{yml,yaml}'], pattern: '(coverageThreshold|coverage.*threshold|fail_under|Codecov|codecov)'}
+        fix: |
+          Set a coverage threshold in the test runner or Codecov and fail CI below it.
+      - slug: accessibility-lint
+        since: 0.2.0
+        title: Accessibility lint rules are enabled
+        why: "Agents miss a11y issues that a linter would catch on every PR."
+        soft: true
+        stack: [react]
+        detect: {type: contains, paths: ['package.json', 'eslint.config.*', '.eslintrc*'], pattern: '(jsx-a11y|eslint-plugin-jsx-a11y|axe-core)'}
+        fix: |
+          Add eslint-plugin-jsx-a11y (or equivalent) and run it in CI.
+      - slug: e2e-test-setup
+        since: 0.2.0
+        title: An end-to-end test setup exists
+        why: "UI flows need a committed e2e harness so agents can verify them."
+        soft: true
+        stack: [react]
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['playwright.config.*', 'cypress.config.*']}
+            - {type: contains, paths: ['package.json'], pattern: '"(playwright|cypress|@playwright/test)"\s*:'}
+        fix: |
+          Add Playwright or Cypress with a documented command in AGENTS.md.
+
+  # ---------------------------------------------------------------------------
+  process-standards:
+    title: Process standards
+    description: How the team plans, documents and ships work.
+    level: optional
+    checks:
+      - slug: contributing-guide
+        since: 0.2.0
+        title: CONTRIBUTING.md exists
+        why: "A new person (or agent) needs the contribution process in the repo."
+        detect: {type: exists, paths: ['CONTRIBUTING.md', 'docs/CONTRIBUTING.md', '.github/CONTRIBUTING.md']}
+        fix: |
+          Add CONTRIBUTING.md covering branch strategy, PR process and how to run checks.
+      - slug: branch-and-release-documented
+        since: 0.2.0
+        title: Branch and release strategy is documented
+        why: "Agents need to know which branch to target and how releases are cut."
+        soft: true
+        detect: {type: contains, paths: ['CONTRIBUTING.md', 'AGENTS.md', 'README.md', 'docs/**/*.md'], pattern: '(branch(ing)? strategy|main|trunk|release|git-flow|trunk-based)'}
+        fix: |
+          Document the branch model and release process in CONTRIBUTING.md or AGENTS.md.
+      - slug: changelog-or-releases
+        since: 0.2.0
+        title: Changelog or release notes are automated or maintained
+        why: "Release notes keep humans and agents aligned on what shipped."
+        soft: true
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['CHANGELOG.md', 'CHANGES.md', '.github/release.yml']}
+            - {type: contains, paths: ['package.json', '.github/**/*.{yml,yaml}'], pattern: '(semantic-release|release-please|changesets|standard-version|git-cliff)'}
+        fix: |
+          Keep a CHANGELOG.md or automate releases (release-please, changesets, semantic-release).
+      - slug: issue-templates
+        since: 0.2.0
+        title: Issue templates exist
+        why: "Structured issues give agents the context they need to start work."
+        soft: true
+        detect: {type: exists, paths: ['.github/ISSUE_TEMPLATE/**', '.github/ISSUE_TEMPLATE.md', '.gitlab/issue_templates/**']}
+        fix: |
+          Add GitHub/GitLab issue templates for bugs and features.
+      - slug: adr-folder
+        since: 0.2.0
+        title: An ADR or decision-record location exists
+        why: "Architecture decisions must live in the repo, not in chat history."
+        soft: true
+        detect: {type: exists, paths: ['docs/adr/**', 'docs/adrs/**', 'adr/**', 'docs/architecture/decisions/**', 'docs/decisions/**']}
+        fix: |
+          Create docs/adr/ (or similar) and point to it from AGENTS.md.
+      - slug: definition-of-done
+        since: 0.2.0
+        title: A definition of done is documented
+        why: "Agents stop too early unless done criteria are written down."
+        soft: true
+        detect: {type: contains, paths: ['AGENTS.md', 'CONTRIBUTING.md', 'docs/**/*.md', '.github/pull_request_template.md'], pattern: '(definition of done|done when|acceptance criteria|ready to merge)'}
+        fix: |
+          Write a short definition of done in AGENTS.md or the PR template.
+
+  # ---------------------------------------------------------------------------
+  code-review:
+    title: Code review practices
+    description: Ownership, review guidelines and PR hygiene.
+    level: optional
+    checks:
+      - slug: codeowners
+        title: CODEOWNERS is defined
+        why: "Ownership makes sure the right people review changes, including changes to .ai-sdlc.yaml itself."
+        detect: {type: exists, paths: ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS']}
+        fix: |
+          Add a CODEOWNERS file and include `.ai-sdlc.yaml` so changes to the audit requirements get reviewed.
+      - slug: review-guidelines
+        since: 0.2.0
+        title: Code review guidelines are documented
+        why: "Reviewers and agents need the same bar for what a good review looks like."
+        soft: true
+        detect: {type: contains, paths: ['CONTRIBUTING.md', 'AGENTS.md', 'docs/**/*.md'], pattern: '(code review|review guideline|review checklist|what to look for)'}
+        fix: |
+          Document review expectations in CONTRIBUTING.md or docs/.
+      - slug: pr-template-traceability
+        title: PR template asks for the spec/ticket link and AI involvement
+        why: "Reviewers need context for AI-assisted changes."
+        soft: true
+        detect: {type: contains, paths: ['.github/pull_request_template.md', '.github/PULL_REQUEST_TEMPLATE.md', 'pull_request_template.md'], pattern: '(ticket|issue|spec|jira)[\s\S]*(AI|copilot|cursor|claude|generated)|(AI|copilot|cursor|claude|generated)[\s\S]*(ticket|issue|spec|jira)'}
+        fix: |
+          Add "Linked ticket/spec" and "AI assistance used (tool, what for)" fields to the pull request template.
+      - slug: ai-review-bot
+        since: 0.2.0
+        title: An AI review bot is configured
+        why: "Automated review catches common issues before humans look."
+        soft: true
+        detect: {type: contains, paths: ['.github/**/*.{yml,yaml}', 'package.json'], pattern: '(coderabbit|gemini-code-assist|github/copilot|cursor.*bugbot|anthropic.*review|ai.?review)'}
+        fix: |
+          Enable an AI review bot on pull requests and document it in AGENTS.md.
+      - slug: pr-size-limit
+        title: Pull request size is limited or flagged in CI
+        why: "Agent-written pull requests can balloon into unreviewable diffs."
+        soft: true
+        detect: {type: contains, paths: ['.github/**/*.{yml,yaml}', '.gitlab-ci.yml', 'dangerfile*', 'Jenkinsfile'], pattern: '(pr-size|size-label|danger|diff-size|max-pr-size|changed-lines|pull-request-size)'}
+        fix: |
+          Add a PR size label/limit action or a Danger rule that flags very large diffs.
+      - slug: branch-protection-reviews
+        since: 0.2.0
+        title: Branch protection requires reviews
+        why: "Required reviews stop unreviewed agent commits landing on the default branch."
+        soft: true
+        scope: local
+        detect: {type: custom, name: branch-protection-reviews}
+        fix: |
+          On GitHub: Settings → Branches → require pull request reviews before merging.
+          This check uses `gh api` and is skipped in CI.
+
+  # ---------------------------------------------------------------------------
+  tooling:
+    title: Other tooling
+    description: Dependency updates, task runners, containers and API docs.
+    level: optional
+    checks:
+      - slug: dependency-update-bot
+        since: 0.2.0
+        title: A dependency update bot is configured
+        why: "Stale dependencies are a quiet source of security and compatibility failures."
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.github/dependabot.yml', 'dependabot.yml', 'renovate.json', 'renovate.json5', '.renovaterc', '.renovaterc.json']}
+            - {type: contains, paths: ['package.json'], pattern: '"renovate"\s*:'}
+        fix: |
+          Add Dependabot or Renovate and review its PRs on a schedule.
+      - slug: task-runner
+        since: 0.2.0
+        title: A task runner or script surface is documented
+        why: "Agents need one place to find setup, lint, test and build commands."
+        soft: true
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['Makefile', 'makefile', 'justfile', 'Justfile', 'Taskfile.yml']}
+            - {type: contains, paths: ['package.json'], pattern: '"scripts"\s*:\s*\{'}
+            - {type: contains, paths: ['AGENTS.md'], pattern: '(npm run|make |just |pnpm |yarn )'}
+        fix: |
+          Keep scripts in package.json or a Makefile and list them in AGENTS.md.
+      - slug: container-or-compose
+        since: 0.2.0
+        title: A container or compose setup exists
+        why: "Local services and the toolchain should start the same way on every machine."
+        detect: {type: exists, paths: ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml', '.devcontainer/**', '.devcontainer.json', 'Dockerfile', 'Dockerfile.dev', 'devbox.json', 'flake.nix']}
+        fix: |
+          Add docker-compose, a Dockerfile or a dev container for the services this project needs.
+      - slug: api-schema-docs
+        since: 0.2.0
+        title: An API schema or docs generator is configured
+        why: "A schema is the contract agents use between frontend and backend."
+        soft: true
+        stack: [node, python, typescript, django]
+        detect: {type: contains, paths: ['package.json', 'pyproject.toml', 'requirements*.txt', '**/*.{py,ts,yml,yaml}'], pattern: '(openapi|swagger|drf-spectacular|specta|graphql.schema|apollo)'}
+        fix: |
+          Publish an OpenAPI/GraphQL schema (drf-spectacular, openapi-typescript, etc.) and document the command.
+      - slug: storybook
+        since: 0.2.0
+        title: Storybook (or equivalent) exists for UI components
+        why: "Component catalogs keep agents from reinventing UI patterns."
+        soft: true
+        stack: [react]
+        detect:
+          type: any
+          of:
+            - {type: exists, paths: ['.storybook/**']}
+            - {type: contains, paths: ['package.json'], pattern: '"(@storybook|storybook)"\s*:'}
+        fix: |
+          Add Storybook (or similar) for shared components.
+
+  # ---------------------------------------------------------------------------
+  best-practices:
+    title: Best practices
+    description: Stack-specific practices that prevent common production mistakes.
+    level: optional
+    checks:
+      - slug: django-secure-settings
+        since: 0.2.0
+        title: Django DEBUG and secrets come from the environment
+        why: "Hard-coded DEBUG=True or SECRET_KEY in settings is a production incident waiting to happen."
+        soft: true
+        stack: [django]
+        detect: {type: contains, paths: ['**/settings*.py', '**/settings/**/*.py'], pattern: '(os\.environ|getenv|django-environ|decouple|env\()'}
+        fix: |
+          Load DEBUG, SECRET_KEY and ALLOWED_HOSTS from the environment; never commit production values.
+      - slug: django-makemigrations-check
+        since: 0.2.0
+        title: makemigrations --check runs in CI
+        why: "Model changes without migrations break every other machine."
+        stack: [django]
+        detect: {type: contains, paths: ['.github/**/*.{yml,yaml}', '.gitlab-ci.yml', 'Makefile', 'tox.ini'], pattern: 'makemigrations\s+.*--check'}
+        fix: |
+          Add `python manage.py makemigrations --check --dry-run` to CI.
+      - slug: structured-logging
+        since: 0.2.0
+        title: Structured logging is configured
+        why: "Plain print/console logs are hard for agents and humans to debug in production."
+        soft: true
+        detect: {type: contains, paths: ['**/*.{js,ts,py,json,yml,yaml}', 'package.json', 'pyproject.toml'], pattern: '(pino|winston|structlog|python-json-logger|bunyan|logrus)'}
+        fix: |
+          Adopt a structured logger (pino, winston, structlog) and document the convention.
+      - slug: health-endpoint
+        since: 0.2.0
+        title: A health or readiness endpoint exists
+        why: "Deployments and agents need a cheap way to know the app is up."
+        soft: true
+        detect: {type: contains, paths: ['**/*.{js,ts,py,go}', '**/urls.py', '**/routes.*'], pattern: '(/health|/readyz|/livez|healthcheck|health_check)'}
+        fix: |
+          Expose a /health (or /readyz) endpoint that checks critical dependencies.
+
+  # ---------------------------------------------------------------------------
+  agent-setup:
+    title: Agent setup
+    description: Project-level skills and rules that agents load automatically.
+    level: optional
+    checks:
+      - slug: project-skills-committed
+        since: 0.2.0
+        title: Project skills or rules are committed
+        why: "Skills that live only in one person's home folder are invisible to teammates and CI."
+        detect: {type: exists, paths: ['.cursor/skills/**/SKILL.md', '.cursor/rules/**', '.claude/skills/**/SKILL.md', '.claude/commands/**', '.agents/skills/**/SKILL.md']}
+        fix: |
+          Commit at least one project skill or rule under .cursor/, .claude/ or .agents/.
+      - slug: skills-well-formed
+        since: 0.2.0
+        title: Committed skills have valid frontmatter
+        why: "A skill without name/description will not load or match correctly."
+        soft: true
+        detect: {type: custom, name: skills-well-formed}
+        fix: |
+          Every SKILL.md needs YAML frontmatter with name and description.
+      - slug: skill-trigger-conflicts
+        title: Skills and rules do not overlap or contradict each other
+        why: "Two skills claiming the same trigger, or rules that disagree, make agent behaviour inconsistent."
+        tier: chat
+        chat_note: "Review in chat: compare skill/rule descriptions and triggers for overlap or contradictions."
+        fix: |
+          Merge or narrow overlapping skills and rules so each has a distinct trigger.
+
+  # ---------------------------------------------------------------------------
+  # Skills, rules and workflows. Nothing here is checked until a project sets it in
+  # .ai-sdlc.yaml: custom (any relevant skill) | <skill-name> | off | unset.
+  # onboarding: true = must be decided (custom / name / off) before READY.
+  # keywords help the chat audit and the "map" command suggest candidates.
+  skills:
+    title: Skills, rules and workflows
+    description: Reusable instructions that make agents behave consistently on common tasks.
+    level: optional
+    skills:
+      - {slug: plan-before-coding, group: General, onboarding: true, title: Plan before coding, description: "Produces a short plan or spec and gets agreement before any code is written.", keywords: [plan, spec, design, approach]}
+      - {slug: self-review, group: General, onboarding: true, title: Self-review of the diff, description: "Reviews its own changes against the repo conventions before declaring work done.", keywords: [review, self, diff, checklist]}
+      - {slug: commit-and-pr-description, group: General, onboarding: true, title: Commit message and PR description, description: "Writes commit messages and pull request descriptions in the team format.", keywords: [commit, pr, pull request, description, message]}
+      - {slug: pr-feedback-triage, group: General, title: PR feedback triage, description: "Reads review feedback, validates each item and drafts responses or changes.", keywords: [feedback, review, comments, triage, pr]}
+      - {slug: fix-failing-tests-and-ci, group: General, onboarding: true, title: Fix failing tests or CI, description: "Diagnoses a failing test or CI job using the repo's own commands.", keywords: [fix, failing, test, ci, build]}
+      - {slug: debug-with-logs, group: General, title: Debug with logs, description: "Finds root causes from logs and error output before changing code.", keywords: [debug, logs, error, trace]}
+      - {slug: codebase-explainer, group: General, title: Codebase explainer, description: "Explains how a part of the codebase works without changing it.", keywords: [explain, onboarding, codebase, architecture]}
+      - {slug: security-review, group: General, onboarding: true, title: Security review, description: "Reviews changes for secrets, injection, permission and dependency risks.", keywords: [security, secrets, injection, vulnerability]}
+      - {slug: docs-sync, group: General, title: Docs sync, description: "Keeps README, AGENTS.md and ADRs accurate after code changes.", keywords: [docs, documentation, readme, agents, sync]}
+      - {slug: dependency-upgrade, group: General, title: Dependency upgrade, description: "Upgrades dependencies safely with changelog review and verification.", keywords: [dependency, upgrade, update, package]}
+
+      - {slug: react-component-conventions, group: React / TypeScript, stack: [react], onboarding: true, title: React component conventions, description: "Component structure, prop typing and composition rules for this codebase.", keywords: [react, component, props, conventions]}
+      - {slug: react-performance-review, group: React / TypeScript, stack: [react], title: React performance review, description: "Finds avoidable re-renders, heavy effects and bundle-size problems.", keywords: [performance, rerender, memo, bundle]}
+      - {slug: accessibility-review, group: React / TypeScript, stack: [react], onboarding: true, title: Accessibility review, description: "Checks semantics, keyboard use, labels and contrast in UI changes.", keywords: [accessibility, a11y, aria, keyboard]}
+      - {slug: api-type-sync, group: React / TypeScript, stack: [typescript], title: API type sync, description: "Keeps frontend types aligned with the backend schema.", keywords: [api, types, schema, sync, openapi]}
+      - {slug: data-fetching-conventions, group: React / TypeScript, stack: [react], title: Data fetching and state conventions, description: "How to fetch, cache and share state in this app.", keywords: [fetch, query, state, cache]}
+      - {slug: design-token-adherence, group: React / TypeScript, stack: [react], title: Design token adherence, description: "Uses design tokens and existing components instead of ad-hoc styles (also covers design-to-code workflows).", keywords: [design, tokens, styles, figma, css]}
+      - {slug: frontend-test-conventions, group: React / TypeScript, stack: [react], onboarding: true, title: Frontend test conventions, description: "What to mock and what to assert in component and hook tests.", keywords: [test, testing, jest, vitest, mock]}
+      - {slug: library-consistency, group: React / TypeScript, stack: [node], title: Library consistency, description: "One library per concern (icons, dates, UI kit); avoids adding a second one.", keywords: [library, dependency, icons, consistency]}
+      - {slug: typescript-strictness-rules, group: React / TypeScript, stack: [typescript], onboarding: true, title: TypeScript strictness rules, description: "No `any`, narrow types, handle null and undefined explicitly.", keywords: [typescript, types, strict, any]}
+
+      - {slug: django-query-safety, group: Django / Python, stack: [django], onboarding: true, title: Django query safety, description: "Avoids N+1 queries and unsafe raw SQL; uses select_related and prefetch_related.", keywords: [django, query, orm, n+1, sql]}
+      - {slug: django-migration-safety, group: Django / Python, stack: [django], onboarding: true, title: Django migration safety, description: "Reversible, lock-aware migrations; no destructive change without a plan.", keywords: [django, migration, schema, database]}
+      - {slug: django-api-conventions, group: Django / Python, stack: [django], title: API and serializer conventions, description: "Conventions for views, serializers, permissions and error responses.", keywords: [django, api, serializer, view, drf]}
+      - {slug: django-settings-and-secrets, group: Django / Python, stack: [django], onboarding: true, title: Settings and secrets handling, description: "Settings split per environment and secrets loaded from the environment.", keywords: [django, settings, secrets, environment]}
+      - {slug: django-test-conventions, group: Django / Python, stack: [django], onboarding: true, title: Django test conventions, description: "Fixtures or factories, database access rules and test layout.", keywords: [django, test, pytest, factory, fixture]}
+      - {slug: django-security-review, group: Django / Python, stack: [django], title: Django security review, description: "Checks permissions, CSRF, raw SQL and input validation.", keywords: [django, security, csrf, permissions]}
+      - {slug: python-type-hints, group: Django / Python, stack: [python], title: Python type hints, description: "Type hint conventions and static checking expectations.", keywords: [python, typing, mypy, pyright, hints]}
+      - {slug: task-idempotency, group: Django / Python, stack: [python], applies_dep: [celery], title: Background task idempotency, description: "Makes background tasks safe to retry and run twice.", keywords: [celery, task, idempotent, retry]}

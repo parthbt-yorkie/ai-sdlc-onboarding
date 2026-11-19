@@ -1,0 +1,155 @@
+# Config paths and patterns the skill already understands.
+# Anything config-looking that is not covered here (and not referenced by a
+# catalog detector path) is logged to .ai-sdlc/unknown-configs.json.
+version: 1
+paths:
+  # environment / runtime
+  - .nvmrc
+  - .node-version
+  - .python-version
+  - .tool-versions
+  - mise.toml
+  - .mise.toml
+  - runtime.txt
+  - Pipfile
+  - package.json
+  - package-lock.json
+  - pnpm-lock.yaml
+  - yarn.lock
+  - bun.lockb
+  - poetry.lock
+  - Pipfile.lock
+  - requirements.txt
+  - requirements*.txt
+  - pyproject.toml
+  - setup.cfg
+  - setup.py
+  - .env.example
+  - .env.sample
+  - .env.template
+  - .env.dist
+  - env.example
+  - docker-compose.yml
+  - docker-compose.yaml
+  - compose.yml
+  - compose.yaml
+  - .devcontainer/**
+  - .devcontainer.json
+  - Dockerfile
+  - Dockerfile.dev
+  - Makefile
+  - makefile
+  - justfile
+  - Justfile
+  - tox.ini
+  - noxfile.py
+  # typescript / node tooling
+  - tsconfig.json
+  - tsconfig.*.json
+  - jsconfig.json
+  - .prettierrc
+  - .prettierrc.*
+  - prettier.config.*
+  - eslint.config.*
+  - .eslintrc*
+  - .editorconfig
+  - biome.json
+  - biome.jsonc
+  - .husky/**
+  - .pre-commit-config.yaml
+  - .pre-commit-config.yml
+  - lefthook.yml
+  - lefthook.yaml
+  - .lintstagedrc*
+  - lint-staged.config.*
+  - vitest.config.*
+  - jest.config.*
+  - playwright.config.*
+  - cypress.config.*
+  - .storybook/**
+  - commitlint.config.*
+  - .commitlintrc*
+  - .dependency-cruiser.*
+  # python tooling
+  - ruff.toml
+  - .ruff.toml
+  - .flake8
+  - mypy.ini
+  - .mypy.ini
+  - pyrightconfig.json
+  - .importlinter
+  - manage.py
+  # agent / AI
+  - AGENTS.md
+  - CLAUDE.md
+  - GEMINI.md
+  - .cursorignore
+  - .cursorindexingignore
+  - .cursor/**
+  - .claude/**
+  - .agents/**
+  - .mcp.json
+  - .vscode/mcp.json
+  - .github/copilot-instructions.md
+  # git / github / gitlab
+  - .gitignore
+  - CODEOWNERS
+  - .github/CODEOWNERS
+  - .gitlab/CODEOWNERS
+  - .github/pull_request_template.md
+  - .github/PULL_REQUEST_TEMPLATE.md
+  - .github/PULL_REQUEST_TEMPLATE/**
+  - .github/ISSUE_TEMPLATE/**
+  - .github/workflows/**
+  - .gitlab-ci.yml
+  - .gitlab/**
+  - .circleci/**
+  - azure-pipelines.yml
+  - bitbucket-pipelines.yml
+  - .drone.yml
+  - .travis.yml
+  - Jenkinsfile
+  - .gitleaks.toml
+  - .gitleaksignore
+  - .secrets.baseline
+  - .trufflehog.yml
+  - renovate.json
+  - renovate.json5
+  - .renovaterc*
+  - dependabot.yml
+  - .github/dependabot.yml
+  # docs / process
+  - README.md
+  - README
+  - CONTRIBUTING.md
+  - docs/**
+  - adr/**
+  - docs/adr/**
+  - docs/adrs/**
+  - docs/architecture/**
+  - CHANGELOG.md
+  - .gitmessage
+patterns:
+  - '**/.env.example'
+  - '**/eslint.config.*'
+  - '**/.eslintrc*'
+  - '**/prettier.config.*'
+  - '**/.prettierrc*'
+  - '**/tsconfig*.json'
+  - '**/vitest.config.*'
+  - '**/jest.config.*'
+  - '**/playwright.config.*'
+  - '**/cypress.config.*'
+  - '**/ruff.toml'
+  - '**/.ruff.toml'
+  - '**/mypy.ini'
+  - '**/.mypy.ini'
+kinds:
+  - {pattern: '(eslint|ruff|flake8|pylint|biome|prettier)', kind: linter}
+  - {pattern: '(workflow|gitlab-ci|jenkins|circleci|travis|drone|azure-pipelines|buildkite)', kind: ci}
+  - {pattern: 'mcp\\.json|mcpServers', kind: mcp}
+  - {pattern: '(AGENTS|CLAUDE|GEMINI|\\.cursor|\\.claude|skills|rules)', kind: agent-rules}
+  - {pattern: '(husky|pre-commit|lefthook|lint-staged)', kind: hooks}
+  - {pattern: '(docker|compose|devcontainer)', kind: container}
+  - {pattern: '(tsconfig|jsconfig)', kind: typescript}
+  - {pattern: '(package\\.json|pyproject|requirements|Pipfile|poetry)', kind: packaging}

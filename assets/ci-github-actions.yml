@@ -1,0 +1,23 @@
+# AI SDLC onboarding job for GitHub Actions. Copy to .github/workflows/ai-sdlc-onboarding.yml
+# It installs the onboarding skill at the version pinned in .ai-sdlc.yaml and runs the audit in CI mode
+# (configuration checks only; authentication and personal-skill checks need a developer machine or chat).
+name: ai-sdlc-onboarding
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the onboarding skill at the pinned version
+        run: |
+          VERSION=$(grep -E '^\s+version:' .ai-sdlc.yaml | head -1 | awk '{print $2}')
+          git clone --depth 1 --branch "v${VERSION}" https://github.com/parthbt-yorkie/ai-sdlc-onboarding.git "$RUNNER_TEMP/ai-sdlc-onboarding"
+      - name: Audit (CI mode)
+        run: node "$RUNNER_TEMP/ai-sdlc-onboarding/scripts/ai-sdlc-onboarding.cjs" audit --ci

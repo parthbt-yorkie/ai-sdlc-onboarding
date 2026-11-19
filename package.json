@@ -1,0 +1,15 @@
+{
+  "name": "ai-sdlc-onboarding",
+  "version": "0.2.0",
+  "description": "AI SDLC onboarding skill: init a per-project config, audit project setup in CLI/CI, and run the full validation in chat",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/cli.js --bundle --platform=node --target=node18 --format=cjs --outfile=scripts/ai-sdlc-onboarding.cjs",
+    "pretest": "npm run build",
+    "test": "node tests/run.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "yaml": "^2.8.0"
+  }
+}
